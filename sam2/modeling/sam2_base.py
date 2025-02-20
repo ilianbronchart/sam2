@@ -36,7 +36,7 @@ class SAM2Base(torch.nn.Module):
         # The maximum number of conditioning frames to participate in the memory attention (-1 means no limit; if there are more conditioning frames than this limit,
         # we only cross-attend to the temporally closest `max_cond_frames_in_attn` conditioning frames in the encoder when tracking each frame). This gives the model
         # a temporal locality when handling a large number of annotated frames (since closer frames should be more important) and also avoids GPU OOM.
-        max_cond_frames_in_attn=-1,
+        max_cond_frames_in_attn=100,
         # on the first frame, whether to directly add the no-memory embedding to the image feature
         # (instead of using the transformer encoder)
         directly_add_no_mem_embed=False,

@@ -4,6 +4,7 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+import gc
 import warnings
 from collections import OrderedDict
 
@@ -14,7 +15,7 @@ from tqdm import tqdm
 
 from sam2.modeling.sam2_base import NO_OBJ_SCORE, SAM2Base
 from sam2.utils.misc import concat_points, fill_holes_in_mask_scores, load_video_frames
-
+from torch.profiler import profile, record_function, ProfilerActivity
 
 class SAM2VideoPredictor(SAM2Base):
     """The predictor class to handle user interactions and manage inference states."""
@@ -26,7 +27,7 @@ class SAM2VideoPredictor(SAM2Base):
         non_overlap_masks=False,
         # whether to clear non-conditioning memory of the surrounding frames (which may contain outdated information) after adding correction clicks;
         # note that this would only apply to *single-object tracking* unless `clear_non_cond_mem_for_multi_obj` is also set to True)
-        clear_non_cond_mem_around_input=False,
+        clear_non_cond_mem_around_input=True,
         # if `add_all_frames_to_correct_as_cond` is True, we also append to the conditioning frame list any frame that receives a later correction click
         # if `add_all_frames_to_correct_as_cond` is False, we conditioning frame list to only use those initial conditioning frames
         add_all_frames_to_correct_as_cond=False,
@@ -37,9 +38,6 @@ class SAM2VideoPredictor(SAM2Base):
         self.non_overlap_masks = non_overlap_masks
         self.clear_non_cond_mem_around_input = clear_non_cond_mem_around_input
         self.add_all_frames_to_correct_as_cond = add_all_frames_to_correct_as_cond
-        # NEW: Add configurable maximum number of frames to retain in inference state.
-        # You can experiment with different values for max_inference_state_frames.
-        self.max_inference_state_frames = kwargs.get("max_inference_state_frames", 100)
 
     @torch.inference_mode()
     def init_state(
@@ -524,11 +522,22 @@ class SAM2VideoPredictor(SAM2Base):
                         out["maskmem_pos_enc"] = maskmem_pos_enc
 
                     obj_output_dict[storage_key][frame_idx] = out
+
+                    print(self.clear_non_cond_mem_around_input)
                     if self.clear_non_cond_mem_around_input:
                         # clear non-conditioning memory of the surrounding frames
-                        self._clear_obj_non_cond_mem_around_input(
-                            inference_state, frame_idx, obj_idx
+                        self._clear_non_cond_mem_around_input(
+                            inference_state, frame_idx
                         )
+
+                    storage_key, obj_key = "non_cond_frame_outputs", "output_dict_per_obj"
+                    oldest_allowed_idx = frame_idx - 16
+                    all_frame_idxs = obj_output_dict[storage_key].keys()
+                    old_frame_idxs = [idx for idx in all_frame_idxs if idx < oldest_allowed_idx]
+                    for old_idx in old_frame_idxs:
+                        obj_output_dict[storage_key].pop(old_idx)
+                        for objid in inference_state[obj_key].keys():
+                            inference_state[obj_key][objid][storage_key].pop(old_idx)
 
                 # clear temporary outputs in `temp_output_dict_per_obj`
                 obj_temp_output_dict[storage_key].clear()
@@ -554,86 +563,83 @@ class SAM2VideoPredictor(SAM2Base):
         reverse=False,
     ):
         """Propagate the input points across frames to track in the entire video."""
-        self.propagate_in_video_preflight(inference_state)
+            self.propagate_in_video_preflight(inference_state)
 
-        obj_ids = inference_state["obj_ids"]
-        num_frames = inference_state["num_frames"]
-        batch_size = self._get_obj_num(inference_state)
+            obj_ids = inference_state["obj_ids"]
+            num_frames = inference_state["num_frames"]
+            batch_size = self._get_obj_num(inference_state)
 
-        # set start index, end index, and processing order
-        if start_frame_idx is None:
-            # default: start from the earliest frame with input points
-            start_frame_idx = min(
-                t
-                for obj_output_dict in inference_state["output_dict_per_obj"].values()
-                for t in obj_output_dict["cond_frame_outputs"]
-            )
-        if max_frame_num_to_track is None:
-            # default: track all the frames in the video
-            max_frame_num_to_track = num_frames
-        if reverse:
-            end_frame_idx = max(start_frame_idx - max_frame_num_to_track, 0)
-            if start_frame_idx > 0:
-                processing_order = range(start_frame_idx, end_frame_idx - 1, -1)
-            else:
-                processing_order = []  # skip reverse tracking if starting from frame 0
-        else:
-            end_frame_idx = min(
-                start_frame_idx + max_frame_num_to_track, num_frames - 1
-            )
-            processing_order = range(start_frame_idx, end_frame_idx + 1)
-
-        for frame_idx in tqdm(processing_order, desc="propagate in video"):
-            pred_masks_per_obj = [None] * batch_size
-            for obj_idx in range(batch_size):
-                obj_output_dict = inference_state["output_dict_per_obj"][obj_idx]
-                # We skip those frames already in consolidated outputs (these are frames
-                # that received input clicks or mask). Note that we cannot directly run
-                # batched forward on them via `_run_single_frame_inference` because the
-                # number of clicks on each object might be different.
-                if frame_idx in obj_output_dict["cond_frame_outputs"]:
-                    storage_key = "cond_frame_outputs"
-                    current_out = obj_output_dict[storage_key][frame_idx]
-                    device = inference_state["device"]
-                    pred_masks = current_out["pred_masks"].to(device, non_blocking=True)
-                    if self.clear_non_cond_mem_around_input:
-                        # clear non-conditioning memory of the surrounding frames
-                        self._clear_obj_non_cond_mem_around_input(
-                            inference_state, frame_idx, obj_idx
-                        )
+            # set start index, end index, and processing order
+            if start_frame_idx is None:
+                # default: start from the earliest frame with input points
+                start_frame_idx = min(
+                    t
+                    for obj_output_dict in inference_state["output_dict_per_obj"].values()
+                    for t in obj_output_dict["cond_frame_outputs"]
+                )
+            if max_frame_num_to_track is None:
+                # default: track all the frames in the video
+                max_frame_num_to_track = num_frames
+            if reverse:
+                end_frame_idx = max(start_frame_idx - max_frame_num_to_track, 0)
+                if start_frame_idx > 0:
+                    processing_order = range(start_frame_idx, end_frame_idx - 1, -1)
                 else:
-                    storage_key = "non_cond_frame_outputs"
-                    current_out, pred_masks = self._run_single_frame_inference(
-                        inference_state=inference_state,
-                        output_dict=obj_output_dict,
-                        frame_idx=frame_idx,
-                        batch_size=1,  # run on the slice of a single object
-                        is_init_cond_frame=False,
-                        point_inputs=None,
-                        mask_inputs=None,
-                        reverse=reverse,
-                        run_mem_encoder=True,
-                    )
-                    obj_output_dict[storage_key][frame_idx] = current_out
-
-                inference_state["frames_tracked_per_obj"][obj_idx][frame_idx] = {
-                    "reverse": reverse
-                }
-                pred_masks_per_obj[obj_idx] = pred_masks
-
-            # Resize the output mask to the original video resolution (we directly use
-            # the mask scores on GPU for output to avoid any CPU conversion in between)
-            if len(pred_masks_per_obj) > 1:
-                all_pred_masks = torch.cat(pred_masks_per_obj, dim=0)
+                    processing_order = []  # skip reverse tracking if starting from frame 0
             else:
-                all_pred_masks = pred_masks_per_obj[0]
-            _, video_res_masks = self._get_orig_video_res_output(
-                inference_state, all_pred_masks
-            )
-            # NEW: Optionally release old frames from the inference state to keep VRAM usage constant.
-            if frame_idx >= self.max_inference_state_frames:
-                self.release_old_frames(inference_state, frame_idx)
-            yield frame_idx, obj_ids, video_res_masks
+                end_frame_idx = min(
+                    start_frame_idx + max_frame_num_to_track, num_frames - 1
+                )
+                processing_order = range(start_frame_idx, end_frame_idx + 1)
+
+            for frame_idx in tqdm(processing_order, desc="propagate in video"):
+                pred_masks_per_obj = [None] * batch_size
+                for obj_idx in range(batch_size):
+                    obj_output_dict = inference_state["output_dict_per_obj"][obj_idx]
+                    # We skip those frames already in consolidated outputs (these are frames
+                    # that received input clicks or mask). Note that we cannot directly run
+                    # batched forward on them via `_run_single_frame_inference` because the
+                    # number of clicks on each object might be different.
+                    if frame_idx in obj_output_dict["cond_frame_outputs"]:
+                        storage_key = "cond_frame_outputs"
+                        current_out = obj_output_dict[storage_key][frame_idx]
+                        device = inference_state["device"]
+                        pred_masks = current_out["pred_masks"].to(device, non_blocking=True)
+                        if self.clear_non_cond_mem_around_input:
+                            # clear non-conditioning memory of the surrounding frames
+                            self._clear_non_cond_mem_around_input(
+                                inference_state, frame_idx
+                            )                    
+                    else:
+                        storage_key = "non_cond_frame_outputs"
+                        current_out, pred_masks = self._run_single_frame_inference(
+                            inference_state=inference_state,
+                            output_dict=obj_output_dict,
+                            frame_idx=frame_idx,
+                            batch_size=1,  # run on the slice of a single object
+                            is_init_cond_frame=False,
+                            point_inputs=None,
+                            mask_inputs=None,
+                            reverse=reverse,
+                            run_mem_encoder=True,
+                        )
+                        obj_output_dict[storage_key][frame_idx] = current_out
+
+                    inference_state["frames_tracked_per_obj"][obj_idx][frame_idx] = {
+                        "reverse": reverse
+                    }
+                    pred_masks_per_obj[obj_idx] = pred_masks
+
+                # Resize the output mask to the original video resolution (we directly use
+                # the mask scores on GPU for output to avoid any CPU conversion in between)
+                if len(pred_masks_per_obj) > 1:
+                    all_pred_masks = torch.cat(pred_masks_per_obj, dim=0)
+                else:
+                    all_pred_masks = pred_masks_per_obj[0]
+                _, video_res_masks = self._get_orig_video_res_output(
+                    inference_state, all_pred_masks
+                )
+                yield frame_idx, obj_ids, video_res_masks
 
     @torch.inference_mode()
     def clear_all_prompts_in_frame(
@@ -978,206 +984,6 @@ class SAM2VideoPredictor(SAM2Base):
             for t in range(frame_idx_begin, frame_idx_end + 1):
                 non_cond_frame_outputs.pop(t, None)
 
-    # NEW: Implementation of release_old_frames.
-    # This method clears old per-object outputs that are outside the retention window,
-    # defined by self.max_inference_state_frames.
-    @torch.inference_mode()
-    def release_old_frames(self, inference_state, current_frame_idx):
-        """
-        Remove frames older than the allowed retention window.
-        This clears per-object outputs from both 'output_dict_per_obj' and 'temp_output_dict_per_obj'.
-        """
-        oldest_allowed_idx = current_frame_idx - self.max_inference_state_frames
-
-        # Clear outputs in per-object dictionaries.
-        for obj_idx in inference_state["output_dict_per_obj"]:
-            # Delete from conditioning outputs.
-            for frame_key in list(inference_state["output_dict_per_obj"][obj_idx]["cond_frame_outputs"].keys()):
-                if frame_key <= oldest_allowed_idx:
-                    del inference_state["output_dict_per_obj"][obj_idx]["cond_frame_outputs"][frame_key]
-            # Delete from non-conditioning outputs.
-            for frame_key in list(inference_state["output_dict_per_obj"][obj_idx]["non_cond_frame_outputs"].keys()):
-                if frame_key <= oldest_allowed_idx:
-                    del inference_state["output_dict_per_obj"][obj_idx]["non_cond_frame_outputs"][frame_key]
-
-        # Also clear temporary outputs similarly.
-        for obj_idx in inference_state["temp_output_dict_per_obj"]:
-            for frame_key in list(inference_state["temp_output_dict_per_obj"][obj_idx]["cond_frame_outputs"].keys()):
-                if frame_key <= oldest_allowed_idx:
-                    del inference_state["temp_output_dict_per_obj"][obj_idx]["cond_frame_outputs"][frame_key]
-            for frame_key in list(inference_state["temp_output_dict_per_obj"][obj_idx]["non_cond_frame_outputs"].keys()):
-                if frame_key <= oldest_allowed_idx:
-                    del inference_state["temp_output_dict_per_obj"][obj_idx]["non_cond_frame_outputs"][frame_key]
-
-    def _run_memory_encoder(
-        self,
-        inference_state,
-        frame_idx,
-        batch_size,
-        high_res_masks,
-        object_score_logits,
-        is_mask_from_pts,
-    ):
-        """
-        Run the memory encoder on `high_res_masks`. This is usually after applying
-        non-overlapping constraints to object scores. Since their scores changed, their
-        memory also need to be computed again with the memory encoder.
-        """
-        # Retrieve correct image features
-        _, _, current_vision_feats, _, feat_sizes = self._get_image_feature(
-            inference_state, frame_idx, batch_size
-        )
-        maskmem_features, maskmem_pos_enc = self._encode_new_memory(
-            current_vision_feats=current_vision_feats,
-            feat_sizes=feat_sizes,
-            pred_masks_high_res=high_res_masks,
-            object_score_logits=object_score_logits,
-            is_mask_from_pts=is_mask_from_pts,
-        )
-
-        # optionally offload the output to CPU memory to save GPU space
-        storage_device = inference_state["storage_device"]
-        maskmem_features = maskmem_features.to(torch.bfloat16)
-        maskmem_features = maskmem_features.to(storage_device, non_blocking=True)
-        # "maskmem_pos_enc" is the same across frames, so we only need to store one copy of it
-        maskmem_pos_enc = self._get_maskmem_pos_enc(
-            inference_state, {"maskmem_pos_enc": maskmem_pos_enc}
-        )
-        return maskmem_features, maskmem_pos_enc
-
-    def _get_maskmem_pos_enc(self, inference_state, current_out):
-        """
-        `maskmem_pos_enc` is the same across frames and objects, so we cache it as
-        a constant in the inference session to reduce session storage size.
-        """
-        model_constants = inference_state["constants"]
-        # "out_maskmem_pos_enc" should be either a list of tensors or None
-        out_maskmem_pos_enc = current_out["maskmem_pos_enc"]
-        if out_maskmem_pos_enc is not None:
-            if "maskmem_pos_enc" not in model_constants:
-                assert isinstance(out_maskmem_pos_enc, list)
-                # only take the slice for one object, since it's same across objects
-                maskmem_pos_enc = [x[0:1].clone() for x in out_maskmem_pos_enc]
-                model_constants["maskmem_pos_enc"] = maskmem_pos_enc
-            else:
-                maskmem_pos_enc = model_constants["maskmem_pos_enc"]
-            # expand the cached maskmem_pos_enc to the actual batch size
-            batch_size = out_maskmem_pos_enc[0].size(0)
-            expanded_maskmem_pos_enc = [
-                x.expand(batch_size, -1, -1, -1) for x in maskmem_pos_enc
-            ]
-        else:
-            expanded_maskmem_pos_enc = None
-        return expanded_maskmem_pos_enc
-
-    @torch.inference_mode()
-    def remove_object(self, inference_state, obj_id, strict=False, need_output=True):
-        """
-        Remove an object id from the tracking state. If strict is True, we check whether
-        the object id actually exists and raise an error if it doesn't exist.
-        """
-        old_obj_idx_to_rm = inference_state["obj_id_to_idx"].get(obj_id, None)
-        updated_frames = []
-        # Check whether this object_id to remove actually exists and possibly raise an error.
-        if old_obj_idx_to_rm is None:
-            if not strict:
-                return inference_state["obj_ids"], updated_frames
-            raise RuntimeError(
-                f"Cannot remove object id {obj_id} as it doesn't exist. "
-                f"All existing object ids: {inference_state['obj_ids']}."
-            )
-
-        # If this is the only remaining object id, we simply reset the state.
-        if len(inference_state["obj_id_to_idx"]) == 1:
-            self.reset_state(inference_state)
-            return inference_state["obj_ids"], updated_frames
-
-        # There are still remaining objects after removing this object id. In this case,
-        # we need to delete the object storage from inference state tensors.
-        # Step 0: clear the input on those frames where this object id has point or mask input
-        # (note that this step is required as it might downgrade conditioning frames to
-        # non-conditioning ones)
-        obj_input_frames_inds = set()
-        obj_input_frames_inds.update(
-            inference_state["point_inputs_per_obj"][old_obj_idx_to_rm]
-        )
-        obj_input_frames_inds.update(
-            inference_state["mask_inputs_per_obj"][old_obj_idx_to_rm]
-        )
-        for frame_idx in obj_input_frames_inds:
-            self.clear_all_prompts_in_frame(
-                inference_state, frame_idx, obj_id, need_output=False
-            )
-
-        # Step 1: Update the object id mapping (note that it must be done after Step 0,
-        # since Step 0 still requires the old object id mappings in inference_state)
-        old_obj_ids = inference_state["obj_ids"]
-        old_obj_inds = list(range(len(old_obj_ids)))
-        remain_old_obj_inds = old_obj_inds.copy()
-        remain_old_obj_inds.remove(old_obj_idx_to_rm)
-        new_obj_ids = [old_obj_ids[old_idx] for old_idx in remain_old_obj_inds]
-        new_obj_inds = list(range(len(new_obj_ids)))
-        # build new mappings
-        old_idx_to_new_idx = dict(zip(remain_old_obj_inds, new_obj_inds))
-        inference_state["obj_id_to_idx"] = dict(zip(new_obj_ids, new_obj_inds))
-        inference_state["obj_idx_to_id"] = dict(zip(new_obj_inds, new_obj_ids))
-        inference_state["obj_ids"] = new_obj_ids
-
-        # Step 2: For per-object tensor storage, we shift their obj_idx in the dict keys.
-        def _map_keys(container):
-            new_kvs = []
-            for k in old_obj_inds:
-                v = container.pop(k)
-                if k in old_idx_to_new_idx:
-                    new_kvs.append((old_idx_to_new_idx[k], v))
-            container.update(new_kvs)
-
-        _map_keys(inference_state["point_inputs_per_obj"])
-        _map_keys(inference_state["mask_inputs_per_obj"])
-        _map_keys(inference_state["output_dict_per_obj"])
-        _map_keys(inference_state["temp_output_dict_per_obj"])
-        _map_keys(inference_state["frames_tracked_per_obj"])
-
-        # Step 3: Further collect the outputs on those frames in `obj_input_frames_inds`, which
-        # could show an updated mask for objects previously occluded by the object being removed
-        if need_output:
-            temp_output_dict_per_obj = inference_state["temp_output_dict_per_obj"]
-            for frame_idx in obj_input_frames_inds:
-                is_cond = any(
-                    frame_idx in obj_temp_output_dict["cond_frame_outputs"]
-                    for obj_temp_output_dict in temp_output_dict_per_obj.values()
-                )
-                consolidated_out = self._consolidate_temp_output_across_obj(
-                    inference_state,
-                    frame_idx,
-                    is_cond=is_cond,
-                    consolidate_at_video_res=True,
-                )
-                _, video_res_masks = self._get_orig_video_res_output(
-                    inference_state, consolidated_out["pred_masks_video_res"]
-                )
-                updated_frames.append((frame_idx, video_res_masks))
-
-        return inference_state["obj_ids"], updated_frames
-
-    def _clear_non_cond_mem_around_input(self, inference_state, frame_idx):
-        """
-        Remove the non-conditioning memory around the input frame. When users provide
-        correction clicks, the surrounding frames' non-conditioning memories can still
-        contain outdated object appearance information and could confuse the model.
-
-        This method clears those non-conditioning memories surrounding the interacted
-        frame to avoid giving the model both old and new information about the object.
-        """
-        r = self.memory_temporal_stride_for_eval
-        frame_idx_begin = frame_idx - r * self.num_maskmem
-        frame_idx_end = frame_idx + r * self.num_maskmem
-        batch_size = self._get_obj_num(inference_state)
-        for obj_idx in range(batch_size):
-            obj_output_dict = inference_state["output_dict_per_obj"][obj_idx]
-            non_cond_frame_outputs = obj_output_dict["non_cond_frame_outputs"]
-            for t in range(frame_idx_begin, frame_idx_end + 1):
-                non_cond_frame_outputs.pop(t, None)
 
 class SAM2VideoPredictorVOS(SAM2VideoPredictor):
     """Optimized for the VOS setting"""
