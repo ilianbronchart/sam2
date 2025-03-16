@@ -8,23 +8,16 @@ import glob
 import logging
 import os
 from dataclasses import dataclass
-
 from typing import List, Optional
 
 import pandas as pd
-
 import torch
-
 from iopath.common.file_io import g_pathmgr
-
 from omegaconf.listconfig import ListConfig
-
-from training.dataset.vos_segment_loader import (
-    JSONSegmentLoader,
-    MultiplePNGSegmentLoader,
-    PalettisedPNGSegmentLoader,
-    SA1BSegmentLoader,
-)
+from training.dataset.vos_segment_loader import (JSONSegmentLoader,
+                                                 MultiplePNGSegmentLoader,
+                                                 PalettisedPNGSegmentLoader,
+                                                 SA1BSegmentLoader)
 
 
 @dataclass

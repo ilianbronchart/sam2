@@ -12,43 +12,24 @@ from typing import Iterable, List, Optional, Tuple, Union
 
 import av
 import strawberry
-from app_conf import (
-    DATA_PATH,
-    DEFAULT_VIDEO_PATH,
-    MAX_UPLOAD_VIDEO_DURATION,
-    UPLOADS_PATH,
-    UPLOADS_PREFIX,
-)
-from data.data_types import (
-    AddPointsInput,
-    CancelPropagateInVideo,
-    CancelPropagateInVideoInput,
-    ClearPointsInFrameInput,
-    ClearPointsInVideo,
-    ClearPointsInVideoInput,
-    CloseSession,
-    CloseSessionInput,
-    RemoveObjectInput,
-    RLEMask,
-    RLEMaskForObject,
-    RLEMaskListOnFrame,
-    StartSession,
-    StartSessionInput,
-    Video,
-)
+from app_conf import (DATA_PATH, DEFAULT_VIDEO_PATH, MAX_UPLOAD_VIDEO_DURATION,
+                      UPLOADS_PATH, UPLOADS_PREFIX)
+from data.data_types import (AddPointsInput, CancelPropagateInVideo,
+                             CancelPropagateInVideoInput,
+                             ClearPointsInFrameInput, ClearPointsInVideo,
+                             ClearPointsInVideoInput, CloseSession,
+                             CloseSessionInput, RemoveObjectInput, RLEMask,
+                             RLEMaskForObject, RLEMaskListOnFrame,
+                             StartSession, StartSessionInput, Video)
 from data.loader import get_video
 from data.store import get_videos
-from data.transcoder import get_video_metadata, transcode, VideoMetadata
-from inference.data_types import (
-    AddPointsRequest,
-    CancelPropagateInVideoRequest,
-    CancelPropagateInVideoRequest,
-    ClearPointsInFrameRequest,
-    ClearPointsInVideoRequest,
-    CloseSessionRequest,
-    RemoveObjectRequest,
-    StartSessionRequest,
-)
+from data.transcoder import VideoMetadata, get_video_metadata, transcode
+from inference.data_types import (AddPointsRequest,
+                                  CancelPropagateInVideoRequest,
+                                  ClearPointsInFrameRequest,
+                                  ClearPointsInVideoRequest,
+                                  CloseSessionRequest, RemoveObjectRequest,
+                                  StartSessionRequest)
 from inference.predictor import InferenceAPI
 from strawberry import relay
 from strawberry.file_uploads import Upload

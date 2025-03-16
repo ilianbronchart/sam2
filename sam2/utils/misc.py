@@ -84,13 +84,12 @@ def mask_to_box(masks: torch.Tensor):
     max_xs, _ = torch.max(torch.where(masks, grid_xs, -1).flatten(-2), dim=-1)
     min_ys, _ = torch.min(torch.where(masks, grid_ys, h).flatten(-2), dim=-1)
     max_ys, _ = torch.max(torch.where(masks, grid_ys, -1).flatten(-2), dim=-1)
-    bbox_coords = torch.stack((min_xs, min_ys, max_xs, max_ys), dim=-1)
+    box_coords = torch.stack((min_xs, min_ys, max_xs, max_ys), dim=-1)
 
-    return bbox_coords
+    return box_coords
 
 
-def _load_img_as_tensor(img_path, image_size):
-    img_pil = Image.open(img_path)
+def _load_img_as_tensor(img_pil, img_path, image_size):
     img_np = np.array(img_pil.convert("RGB").resize((image_size, image_size)))
     if img_np.dtype == np.uint8:  # np.uint8 is expected for JPEG images
         img_np = img_np / 255.0
@@ -128,6 +127,7 @@ class AsyncVideoFrameLoader:
         self.video_height = None
         self.video_width = None
         self.compute_device = compute_device
+        self.last_loaded_image = None
 
         # load the first frame to fill video_height and video_width and also
         # to cache it (since it's most likely where the user will click)
@@ -152,9 +152,10 @@ class AsyncVideoFrameLoader:
         if img is not None:
             return img
 
-        img, video_height, video_width = _load_img_as_tensor(
-            self.img_paths[index], self.image_size
-        )
+        img_pil = Image.open(self.img_paths[index]).convert("RGB")
+        self.last_loaded_image = np.array(img_pil)
+
+        img, video_height, video_width = _load_img_as_tensor(img_pil, self.img_paths[index], self.image_size)
         self.video_height = video_height
         self.video_width = video_width
         # normalize by mean and std

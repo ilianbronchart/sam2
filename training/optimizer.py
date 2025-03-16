@@ -9,22 +9,10 @@ import inspect
 import itertools
 import logging
 import types
-from typing import (
-    Any,
-    Callable,
-    Dict,
-    Iterable,
-    List,
-    Mapping,
-    Optional,
-    Set,
-    Tuple,
-    Type,
-    Union,
-)
+from typing import (Any, Callable, Dict, Iterable, List, Mapping, Optional,
+                    Set, Tuple, Type, Union)
 
 import hydra
-
 import torch
 import torch.nn as nn
 from omegaconf import DictConfig

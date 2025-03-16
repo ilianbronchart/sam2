@@ -9,9 +9,8 @@ import math
 from typing import Callable, Iterable, List, Optional, Sequence
 
 import torch
-
-from torch.utils.data import BatchSampler, DataLoader, Dataset, IterableDataset, Subset
-
+from torch.utils.data import (BatchSampler, DataLoader, Dataset,
+                              IterableDataset, Subset)
 from torch.utils.data.distributed import DistributedSampler
 
 
